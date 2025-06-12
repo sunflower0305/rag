@@ -1,0 +1,9 @@
+openai>=1.0.0
+python-dotenv>=1.0.0
+langchain>=0.1.0
+langchain-community>=0.0.13
+langchain-dashscope==0.1.8
+faiss-cpu>=1.7.4
+pypdf>=3.17.0
+argparse>=1.4.0
+tiktoken==0.7.0
