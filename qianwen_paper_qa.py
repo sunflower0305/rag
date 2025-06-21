@@ -62,7 +62,7 @@ def create_paper_qa(pdf_path, api_key):
         
         # 使用千问text-embedding-v2模型进行embedding
         embeddings = DashScopeEmbeddings(
-            model="text-embedding-v1"
+            model="text-embedding-v4"
         )
         print(f"✓ 千问嵌入模型加载完成")
         print(f"  耗时: {time.time() - embed_start:.2f}秒")
