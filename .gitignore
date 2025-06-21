@@ -65,3 +65,6 @@ dmypy.json
 
 # Database
 qianwen_faiss_index/
+
+# Cache
+pdf_embeddings_cache/

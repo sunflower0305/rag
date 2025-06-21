@@ -11,87 +11,145 @@ from openai import OpenAI
 import os
 import time
 import argparse
+import hashlib
+import pickle
+import dashscope
 
 
 # 加载.env文件中的环境变量
 load_dotenv()
 
-client = OpenAI(
-    api_key=os.getenv("DASHSCOPE_API_KEY"),  # 从环境变量获取API密钥
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"  # 百炼服务的base_url
-)
+# client = OpenAI(
+#     api_key=os.getenv("DASHSCOPE_API_KEY"),  # 从环境变量获取API密钥
+#     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"  # 百炼服务的base_url
+# )
+
+def get_file_hash(file_path):
+    """计算文件的MD5哈希值"""
+    hash_md5 = hashlib.md5()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+def get_cache_path(pdf_hash):
+    """获取缓存文件路径"""
+    cache_dir = "pdf_embeddings_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"{pdf_hash}.pkl")
+
+def save_embeddings_cache(pdf_hash, vector_store, chunks_metadata):
+    """保存嵌入缓存"""
+    cache_path = get_cache_path(pdf_hash)
+    cache_data = {
+        'vector_store': vector_store,
+        'chunks_metadata': chunks_metadata,
+        'timestamp': time.time()
+    }
+    with open(cache_path, 'wb') as f:
+        pickle.dump(cache_data, f)
+    print(f"✓ 嵌入缓存已保存: {cache_path}")
+
+def load_embeddings_cache(pdf_hash):
+    """加载嵌入缓存"""
+    cache_path = get_cache_path(pdf_hash)
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                cache_data = pickle.load(f)
+            print(f"✓ 找到缓存嵌入，跳过重复处理")
+            return cache_data['vector_store'], cache_data['chunks_metadata']
+        except Exception as e:
+            print(f"⚠️ 缓存加载失败: {e}，将重新生成嵌入")
+    return None, None
+
+
 
 def create_paper_qa(pdf_path, api_key):
     """
     创建一个基于阿里云千问的论文问答系统
     使用千问embedding模型进行向量化，使用千问大语言模型进行问答
     """
-    api_key = os.getenv("DASHSCOPE_API_KEY")  # 从环境变量获取API密钥
+    # api_key = os.getenv("DASHSCOPE_API_KEY")  # 从环境变量获取API密钥
+    # 设置dashscope API key
+
+    dashscope.api_key = api_key
+    print('2. 这是阿里云APIKey： ',api_key)
     try:
         print("===== 开始执行千问RAG流程 =====")
         start_time = time.time()
         
         # 设置阿里云千问API密钥
-        os.environ["DASHSCOPE_API_KEY"] = api_key
+        # os.environ["DASHSCOPE_API_KEY"] = api_key
         
-        # 1. 加载PDF文档
-        print("1. 开始加载PDF文档...")
-        loader = PyPDFLoader("attention_is_all_you_need.pdf")
-        documents = loader.load()
-        print(f"✓ PDF加载完成，共 {len(documents)} 个文档页面")
-        print(f"  耗时: {time.time() - start_time:.2f}秒")
+        # 计算PDF文件哈希
+        print("0. 计算PDF文件哈希...")
+        pdf_hash = get_file_hash(pdf_path)
+        print(f"✓ PDF哈希: {pdf_hash}")
         
-        # 2. 文档分块
-        print("\n2. 开始文档分块...")
-        chunk_start = time.time()
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
-        )
-        chunks = text_splitter.split_documents(documents)
-        print(f"✓ 文档分块完成，共 {len(chunks)} 个文本块")
-        print(f"  耗时: {time.time() - chunk_start:.2f}秒")
+        # 尝试加载缓存的嵌入
+        vector_store, cached_metadata = load_embeddings_cache(pdf_hash)
         
-        # 3. 创建向量存储 - 使用千问的嵌入模型
-        print("\n3. 开始加载千问嵌入模型...")
-        embed_start = time.time()
-        
-        # 设置dashscope API key
-        import dashscope
-        dashscope.api_key = api_key
-        
-        # 使用千问text-embedding-v2模型进行embedding
-        embeddings = DashScopeEmbeddings(
-            model="text-embedding-v4"
-        )
-        print(f"✓ 千问嵌入模型加载完成")
-        print(f"  耗时: {time.time() - embed_start:.2f}秒")
-        
-        print("\n4. 开始生成文档嵌入...")
-        vector_start = time.time()
-        
-        # 由于DashScope embedding API有批量大小限制(最大25)，我们需要分批处理
-        batch_size = 20  # 设置为20以确保不超过限制
-        all_texts = [doc.page_content for doc in chunks]
-        all_metadatas = [doc.metadata for doc in chunks]
-        
-        # 分批处理文档
-        vector_store = None
-        for i in range(0, len(all_texts), batch_size):
-            batch_texts = all_texts[i:i+batch_size]
-            batch_metadatas = all_metadatas[i:i+batch_size]
+        if vector_store is not None:
+            print("✓ 使用缓存的嵌入，跳过文档处理和向量化步骤")
+        else:
+            # 1. 加载PDF文档
+            print("1. 开始加载PDF文档...")
+            loader = PyPDFLoader(pdf_path)
+            documents = loader.load()
+            print(f"✓ PDF加载完成，共 {len(documents)} 个文档页面")
+            print(f"  耗时: {time.time() - start_time:.2f}秒")
             
-            print(f"  处理批次 {i//batch_size + 1}/{(len(all_texts) + batch_size - 1)//batch_size}...")
+            # 2. 文档分块
+            print("\n2. 开始文档分块...")
+            chunk_start = time.time()
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200
+            )
+            chunks = text_splitter.split_documents(documents)
+            print(f"✓ 文档分块完成，共 {len(chunks)} 个文本块")
+            print(f"  耗时: {time.time() - chunk_start:.2f}秒")
             
-            if vector_store is None:
-                # 创建第一个向量存储
-                vector_store = FAISS.from_texts(batch_texts, embeddings, metadatas=batch_metadatas)
-            else:
-                # 添加到现有向量存储
-                batch_vector_store = FAISS.from_texts(batch_texts, embeddings, metadatas=batch_metadatas)
-                vector_store.merge_from(batch_vector_store)
-        print(f"✓ 向量存储创建完成")
-        print(f"  耗时: {time.time() - vector_start:.2f}秒")
+            # 3. 创建向量存储 - 使用千问的嵌入模型
+            print("\n3. 开始加载千问嵌入模型...")
+            embed_start = time.time()
+            
+            # 使用千问text-embedding-v4模型进行embedding
+            embeddings = DashScopeEmbeddings(
+                model="text-embedding-v4"
+            )
+            print(f"✓ 千问嵌入模型加载完成")
+            print(f"  耗时: {time.time() - embed_start:.2f}秒")
+            
+            print("\n4. 开始生成文档嵌入...")
+            vector_start = time.time()
+            
+            # 由于DashScope embedding API有批量大小限制(最大10)，我们需要分批处理
+            batch_size = 10  # 设置为10以确保不超过限制
+            all_texts = [doc.page_content for doc in chunks]
+            all_metadatas = [doc.metadata for doc in chunks]
+            
+            # 分批处理文档
+            vector_store = None
+            for i in range(0, len(all_texts), batch_size):
+                batch_texts = all_texts[i:i+batch_size]
+                batch_metadatas = all_metadatas[i:i+batch_size]
+                
+                print(f"  处理批次 {i//batch_size + 1}/{(len(all_texts) + batch_size - 1)//batch_size}...")
+                
+                if vector_store is None:
+                    # 创建第一个向量存储
+                    vector_store = FAISS.from_texts(batch_texts, embeddings, metadatas=batch_metadatas)
+                else:
+                    # 添加到现有向量存储
+                    batch_vector_store = FAISS.from_texts(batch_texts, embeddings, metadatas=batch_metadatas)
+                    vector_store.merge_from(batch_vector_store)
+            print(f"✓ 向量存储创建完成")
+            print(f"  耗时: {time.time() - vector_start:.2f}秒")
+            
+            # 保存嵌入缓存
+            save_embeddings_cache(pdf_hash, vector_store, all_metadatas)
         
         # 4. 创建检索器
         print("\n5. 创建检索器...")
@@ -122,9 +180,9 @@ def create_paper_qa(pdf_path, api_key):
         query_start = time.time()
         queries = [
             "这篇论文的主要研究内容是什么？",
-            "这篇论文的主要贡献和创新点是什么？",
-            "这篇论文的研究方法是什么？",
-            "这篇论文的实验结果如何？"
+            # "这篇论文的主要贡献和创新点是什么？",
+            # "这篇论文的研究方法是什么？",
+            # "这篇论文的实验结果如何？"
         ]
         
         print("\n===== 论文主旨分析 =====")
@@ -165,7 +223,8 @@ def main():
     # parser.add_argument('--query', type=str, help='自定义问题(可选)')
     #
     # args = parser.parse_args()
-    pdf = 'txt.pdf'
+    print('1. 这是阿里云APIKey： ',api_key)
+    pdf = 'attention_is_all_you_need.pdf'
     qa_chain = create_paper_qa(pdf, api_key)
     query = '请给出文章的摘要'
     # 如果用户提供了自定义问题，则额外回答
