@@ -62,3 +62,6 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Database
+qianwen_faiss_index/

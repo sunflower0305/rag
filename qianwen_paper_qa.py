@@ -12,14 +12,14 @@ import os
 import time
 import argparse
 
-#加载.env文件中的环境变量
+
+# 加载.env文件中的环境变量
 load_dotenv()
 
 client = OpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),  # 从环境变量获取API密钥
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"  # 百炼服务的base_url
 )
-
 
 def create_paper_qa(pdf_path, api_key):
     """
@@ -130,7 +130,7 @@ def create_paper_qa(pdf_path, api_key):
         print("\n===== 论文主旨分析 =====")
         for i, query in enumerate(queries, 1):
             print(f"\n问题 {i}: {query}")
-            response = qa_chain.run(query)
+            response = qa_chain.invoke({"query": query})["result"]
             print(f"回答:")
             print("-" * 50)
             print(response)
@@ -157,6 +157,7 @@ def create_paper_qa(pdf_path, api_key):
         return None
 
 def main():
+
     api_key = os.getenv("DASHSCOPE_API_KEY")  # 从环境变量获取API密钥
     # parser = argparse.ArgumentParser(description='使用阿里云千问模型分析论文主旨')
     # parser.add_argument('--pdf', type=str, required=True, help='attention_is_all_you_need.pdf')
@@ -172,7 +173,7 @@ def main():
         print("\n===== 自定义问题 =====")
         print(f"问题: {query}")
         query_start = time.time()
-        response = qa_chain.run(query)
+        response = qa_chain.invoke({"query": query})["result"]
         print(f"回答:")
         print("-" * 50)
         print(response)
