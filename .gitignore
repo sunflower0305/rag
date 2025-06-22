@@ -65,6 +65,12 @@ dmypy.json
 
 # Database
 qianwen_faiss_index/
+chroma_db/
 
 # Cache
 pdf_embeddings_cache/
+.gradio/
+.claude/
+
+# PDF File
+*.pdf
