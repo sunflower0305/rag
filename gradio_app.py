@@ -22,7 +22,7 @@ class GradioRAGApp:
         self.vector_store_type = "chroma"  # 默认使用ChromaDB
         self.db = ChatHistoryDB()  # 初始化数据库
         self.current_session_id = None  # 当前会话ID
-        self._sessions_full_data = []  # 存储完整的会话数据
+        self._session_option_map = {}  # 存储选项到session_id的映射
     
     def initialize_api(self, api_key: str, vector_store_type: str) -> Tuple[str, bool]:
         """初始化API"""
@@ -302,15 +302,15 @@ class GradioRAGApp:
         except Exception as e:
             return [], f"❌ 加载会话历史失败: {str(e)}"
     
-    def get_recent_sessions_data(self) -> List[List]:
-        """获取最近会话数据（用于Gradio DataFrame）"""
+    def get_sessions_display_text(self) -> str:
+        """获取会话列表的显示文本"""
         try:
             sessions = self.db.get_recent_sessions(limit=20)
             if not sessions:
-                return []
+                return "📜 **历史会话：** 暂无历史记录"
             
-            session_data = []
-            for session in sessions:
+            session_list = "📜 **最近会话：**\n\n"
+            for i, session in enumerate(sessions):
                 msg_count = session['message_count']
                 updated_time = session['updated_at'][:16]  # 截取到分钟
                 doc_name = "未知文档"
@@ -325,18 +325,57 @@ class GradioRAGApp:
                     if isinstance(doc_info, dict) and 'file_name' in doc_info:
                         doc_name = doc_info['file_name']
                 
-                session_data.append([
-                    session['session_name'],
-                    doc_name,
-                    f"{msg_count}条",
-                    updated_time,
-                    session['session_id']  # 保持完整ID，后面在界面处理
-                ])
+                # 使用HTML样式来使其可点击
+                session_list += f"""<div style="border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 8px 0; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); cursor: pointer;" onclick="selectSession('{session['session_id']}', {i})">
+🔸 **{session['session_name']}**  
+📄 文档: {doc_name}  
+💬 消息: {msg_count}条 | ⏰ {updated_time}
+</div>
+
+"""
             
-            return session_data
+            return session_list
             
         except Exception as e:
             logger.error(f"获取会话列表失败: {e}")
+            return f"❌ 获取会话列表失败: {str(e)}"
+    
+    def get_sessions_for_radio(self) -> List[str]:
+        """获取会话选项列表（用于Radio组件）"""
+        try:
+            sessions = self.db.get_recent_sessions(limit=20)
+            if not sessions:
+                return []
+            
+            session_options = []
+            for session in sessions:
+                msg_count = session['message_count']
+                updated_time = session['updated_at'][:16]
+                doc_name = "未知文档"
+                if session['document_info']:
+                    doc_info = session['document_info']
+                    if isinstance(doc_info, str):
+                        import json
+                        try:
+                            doc_info = json.loads(doc_info)
+                        except:
+                            pass
+                    if isinstance(doc_info, dict) and 'file_name' in doc_info:
+                        doc_name = doc_info['file_name']
+                
+                # 创建选项显示文本，同时在内部保存session_id的映射
+                option_text = f"🔸 {session['session_name']} | 📄 {doc_name} | 💬 {msg_count}条 | ⏰ {updated_time}"
+                session_options.append(option_text)
+                
+                # 保存选项到session_id的映射
+                if not hasattr(self, '_session_option_map'):
+                    self._session_option_map = {}
+                self._session_option_map[option_text] = session['session_id']
+            
+            return session_options
+            
+        except Exception as e:
+            logger.error(f"获取会话选项失败: {e}")
             return []
     
     def get_session_details(self, session_id: str) -> str:
@@ -597,29 +636,15 @@ class GradioRAGApp:
                     # 历史记录管理区域
                     gr.Markdown("### 📜 历史记录管理")
                     
-                    # 刷新按钮
-                    refresh_sessions_btn = gr.Button("🔄 刷新会话列表", variant="secondary")
+                    # 初始化会话选项
+                    initial_sessions_options = self.get_sessions_for_radio()
                     
-                    # 初始化会话数据
-                    initial_sessions_data = self.get_recent_sessions_data()
-                    self._sessions_full_data = initial_sessions_data
-                    # 创建显示友好的数据
-                    initial_display_data = []
-                    for row in initial_sessions_data:
-                        display_row = row.copy()
-                        display_row[4] = row[4][-8:] + "..." if row[4] else ""
-                        initial_display_data.append(display_row)
-                    
-                    # 会话列表（使用DataFrame显示）
-                    sessions_table = gr.Dataframe(
-                        headers=["会话名称", "文档", "消息数", "更新时间", "ID"],
-                        datatype=["str", "str", "str", "str", "str"],
-                        col_count=(5, "fixed"),
-                        row_count=(8, "dynamic"),
-                        value=initial_display_data,
-                        interactive=False,
-                        wrap=True,
-                        label="📋 历史会话列表（点击行来选择会话）"
+                    # 会话列表（使用Radio显示）
+                    sessions_radio = gr.Radio(
+                        choices=initial_sessions_options,
+                        value=None,
+                        label="📋 历史会话列表（点击选择会话）",
+                        info="选择一个会话来查看详情或加载对话"
                     )
                     
                     # 选中的会话ID（隐藏组件，用于传递数据）
@@ -630,17 +655,20 @@ class GradioRAGApp:
                     
                     # 初始会话详情显示
                     initial_details_text = "请从上方列表中选择一个会话"
-                    if initial_sessions_data:
-                        initial_details_text = f"""
+                    if initial_sessions_options:
+                        # 从数据库获取统计信息
+                        sessions_data = self.db.get_recent_sessions(limit=20)
+                        if sessions_data:
+                            initial_details_text = f"""
 ### 📊 历史记录统计
 
-📋 **总会话数：** {len(initial_sessions_data)}个  
-🕒 **最新会话：** {initial_sessions_data[0][0] if initial_sessions_data else "无"}  
-📄 **最新文档：** {initial_sessions_data[0][1] if initial_sessions_data else "无"}  
+📋 **总会话数：** {len(sessions_data)}个  
+🕒 **最新会话：** {sessions_data[0]['session_name']}  
+📄 **最新文档：** {sessions_data[0].get('document_info', {}).get('file_name', '未知文档') if sessions_data[0].get('document_info') else '未知文档'}  
 
 ---
-💡 **操作提示：** 点击上方表格中的任意行来查看会话详情和加载对话
-                        """
+💡 **操作提示：** 点击上方列表中的会话选项来查看详情和加载对话
+                            """
                     
                     # 会话详情显示
                     session_details = gr.Markdown(
@@ -721,35 +749,32 @@ class GradioRAGApp:
                 status, info, visible, doc_list = self.upload_documents(files)
                 # 如果上传成功，自动刷新历史记录
                 if visible:
-                    updated_sessions_data = self.get_recent_sessions_data()
-                    self._sessions_full_data = updated_sessions_data
-                    display_data = []
-                    for row in updated_sessions_data:
-                        display_row = row.copy()
-                        display_row[4] = row[4][-8:] + "..." if row[4] else ""
-                        display_data.append(display_row)
-                    
+                    options = self.get_sessions_for_radio()
                     # 更新会话统计
-                    updated_details = f"""
+                    sessions_data = self.db.get_recent_sessions(limit=20)
+                    if sessions_data:
+                        updated_details = f"""
 ### 📊 历史记录统计
 
-📋 **总会话数：** {len(updated_sessions_data)}个  
-🕒 **最新会话：** {updated_sessions_data[0][0] if updated_sessions_data else "无"}  
-📄 **最新文档：** {updated_sessions_data[0][1] if updated_sessions_data else "无"}  
+📋 **总会话数：** {len(sessions_data)}个  
+🕒 **最新会话：** {sessions_data[0]['session_name']}  
+📄 **最新文档：** {sessions_data[0].get('document_info', {}).get('file_name', '未知文档') if sessions_data[0].get('document_info') else '未知文档'}  
 
 ---
-💡 **操作提示：** 点击上方表格中的任意行来查看会话详情和加载对话
-                    """ if updated_sessions_data else "请从上方列表中选择一个会话"
+💡 **操作提示：** 点击上方列表中的会话选项来查看详情和加载对话
+                        """
+                    else:
+                        updated_details = "请从上方列表中选择一个会话"
                     
                     return (status, info, gr.update(visible=visible), gr.update(value=doc_list, visible=visible), 
-                           display_data, updated_details)
+                           gr.update(choices=options), updated_details)
                 else:
                     return status, info, gr.update(visible=visible), gr.update(value=doc_list, visible=visible), gr.update(), gr.update()
             
             file_upload.upload(
                 fn=update_upload_status,
                 inputs=[file_upload],
-                outputs=[upload_status, document_info, summary_btn, document_list, sessions_table, session_details],
+                outputs=[upload_status, document_info, summary_btn, document_list, sessions_radio, session_details],
                 show_progress=True
             )
             
@@ -806,79 +831,57 @@ class GradioRAGApp:
             
             # 历史记录管理事件绑定
             
-            # 刷新会话列表
-            def refresh_sessions():
-                data = self.get_recent_sessions_data()
-                # 存储完整数据供选择事件使用
-                self._sessions_full_data = data
-                # 创建显示友好的数据
-                display_data = []
-                for row in data:
-                    display_row = row.copy()
-                    display_row[4] = row[4][-8:] + "..."  # 只显示ID的后8位
-                    display_data.append(display_row)
-                return display_data, "请从上方列表中选择一个会话", ""
-            
-            refresh_sessions_btn.click(
-                fn=refresh_sessions,
-                inputs=[],
-                outputs=[sessions_table, session_details, selected_session_id]
-            )
-            
-            # 会话表格选择事件
-            def on_session_select(evt: gr.SelectData):
-                if evt.index is not None:
+            # 会话Radio选择事件
+            def on_session_radio_change(selected_option):
+                if selected_option and hasattr(self, '_session_option_map'):
                     try:
-                        # 使用存储的完整数据
-                        if hasattr(self, '_sessions_full_data') and self._sessions_full_data:
-                            if evt.index[0] < len(self._sessions_full_data):
-                                row_data = self._sessions_full_data[evt.index[0]]
-                                session_id = row_data[4]  # 完整的会话ID
-                                details = self.get_session_details(session_id)
-                                return details, session_id
-                            else:
-                                return "❌ 选择的行不存在", ""
+                        session_id = self._session_option_map.get(selected_option)
+                        if session_id:
+                            details = self.get_session_details(session_id)
+                            return details, session_id
                         else:
-                            return "❌ 请先刷新会话列表", ""
-                            
-                    except (IndexError, TypeError, AttributeError) as e:
+                            return "❌ 会话ID未找到", ""
+                    except Exception as e:
                         logger.error(f"选择会话失败: {e}")
                         return "❌ 选择会话失败", ""
                 return "请选择一个会话", ""
             
-            sessions_table.select(
-                fn=on_session_select,
+            sessions_radio.change(
+                fn=on_session_radio_change,
+                inputs=[sessions_radio],
                 outputs=[session_details, selected_session_id]
             )
             
             # 加载会话
             def handle_load_session(session_id):
                 if not session_id:
-                    return [], "❌ 请先选择一个会话", self.get_recent_sessions_data()
+                    return [], "❌ 请先选择一个会话", gr.update()
                 
                 history, status = self.get_session_history(session_id)
-                sessions_data = self.get_recent_sessions_data()
-                return history, status, sessions_data
+                # 刷新会话列表
+                options = self.get_sessions_for_radio()
+                return history, status, gr.update(choices=options)
             
             load_session_btn.click(
                 fn=handle_load_session,
                 inputs=[selected_session_id],
-                outputs=[chatbot, history_status, sessions_table]
+                outputs=[chatbot, history_status, sessions_radio]
             )
             
             # 删除会话
             def handle_delete_session(session_id):
                 if not session_id:
-                    return "❌ 请先选择一个会话", self.get_recent_sessions_data(), "请从上方列表中选择一个会话", ""
+                    return "❌ 请先选择一个会话", gr.update(), "请从上方列表中选择一个会话", ""
                 
                 status = self.delete_session_by_id(session_id)
-                sessions_data = self.get_recent_sessions_data()
-                return status, sessions_data, "请从上方列表中选择一个会话", ""
+                # 刷新会话列表
+                options = self.get_sessions_for_radio()
+                return status, gr.update(choices=options, value=None), "请从上方列表中选择一个会话", ""
             
             delete_session_btn.click(
                 fn=handle_delete_session,
                 inputs=[selected_session_id],
-                outputs=[history_status, sessions_table, session_details, selected_session_id]
+                outputs=[history_status, sessions_radio, session_details, selected_session_id]
             )
             
             # 搜索历史
