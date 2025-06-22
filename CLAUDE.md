@@ -32,10 +32,16 @@ python main.py
 ### Testing
 ```bash
 # Test custom LLM integration
-python test_custom_llm.py
+python test/test_custom_llm.py
 
 # Test retrieval functionality only
-python test_retrieval_only.py
+python test/test_retrieval_only.py
+
+# Test ChromaDB integration
+python test/test_chroma_integration.py
+
+# Debug DashScope API
+python test/debug_dashscope.py
 ```
 
 ## Architecture

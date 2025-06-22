@@ -683,20 +683,16 @@ class GradioRAGApp:
                         delete_session_btn = gr.Button("🗑️ 删除此会话", variant="stop", size="sm")
                     
                     # 搜索功能
-                    with gr.Group():
-                        gr.Markdown("**🔍 搜索历史**")
-                        
-                        search_input = gr.Textbox(
-                            label="搜索关键词",
-                            placeholder="搜索聊天记录..."
-                        )
-                        
-                        search_btn = gr.Button("🔍 搜索", variant="secondary")
-                        
-                        search_results = gr.Markdown(
-                            value="输入关键词进行搜索",
-                            elem_classes=["document-info"]
-                        )
+                    search_input = gr.Textbox(
+                        placeholder="搜索聊天记录...",
+                        show_label=False
+                    )
+                    
+                    search_results = gr.Markdown(
+                        value="",
+                        visible=False,
+                        elem_classes=["document-info"]
+                    )
                     
                     # 操作状态
                     history_status = gr.Textbox(
@@ -722,7 +718,7 @@ class GradioRAGApp:
             - **FAISS模式**：高性能检索，但只支持单次批量上传
             - **上传方式**：可以一次选择多个PDF文件，也可以分多次上传
             - **文档限制**：仅支持PDF格式，建议单文件不超过100MB
-            - **历史管理**：自动加载历史会话，点击选择会话即可加载对话；支持关键词搜索
+            - **历史管理**：自动加载历史会话，点击选择会话即可加载对话；输入关键词按回车搜索
             """)
             
             # 事件绑定
@@ -886,11 +882,18 @@ class GradioRAGApp:
                 outputs=[history_status, sessions_radio, session_details, selected_session_id, session_action_row]
             )
             
-            # 搜索历史
-            search_btn.click(
-                fn=self.search_chat_history,
+            # 搜索历史（按回车键搜索）
+            def handle_search(query):
+                if query and query.strip():
+                    result = self.search_chat_history(query)
+                    return result, gr.update(visible=True)
+                else:
+                    return "", gr.update(visible=False)
+            
+            search_input.submit(
+                fn=handle_search,
                 inputs=[search_input],
-                outputs=[search_results]
+                outputs=[search_results, search_results]
             )
         
         return app
