@@ -49,6 +49,9 @@ class GradioRAGApp:
         try:
             for i, file in enumerate(files):
                 try:
+                    # 获取原始文件名
+                    original_filename = os.path.basename(file)
+                    
                     # 处理单个文件
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                         with open(file, 'rb') as f:
@@ -58,11 +61,11 @@ class GradioRAGApp:
                     # 对于第一个文档或单独上传，使用process_document
                     # 对于后续文档，使用add_document（仅ChromaDB支持）
                     if i == 0 and is_first_upload:
-                        result = self.api.process_document(tmp_file_path)
+                        result = self.api.process_document(tmp_file_path, original_filename)
                     elif self.vector_store_type == "chroma" and not is_first_upload:
-                        result = self.api.add_document(tmp_file_path)
+                        result = self.api.add_document(tmp_file_path, original_filename)
                     else:
-                        result = self.api.process_document(tmp_file_path)
+                        result = self.api.process_document(tmp_file_path, original_filename)
                     
                     # 清理临时文件
                     try:
@@ -201,6 +204,9 @@ class GradioRAGApp:
             return "❌ 请选择PDF文件", ""
         
         try:
+            # 获取原始文件名
+            original_filename = os.path.basename(file)
+            
             # 处理文件
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                 with open(file, 'rb') as f:
@@ -208,7 +214,7 @@ class GradioRAGApp:
                 tmp_file_path = tmp_file.name
             
             # 添加文档
-            result = self.api.add_document(tmp_file_path)
+            result = self.api.add_document(tmp_file_path, original_filename)
             
             # 清理临时文件
             try:

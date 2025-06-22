@@ -263,7 +263,7 @@ class QianwenPaperQAAPI:
         
         return vector_store
     
-    def process_document(self, pdf_path: str) -> Dict[str, Any]:
+    def process_document(self, pdf_path: str, original_filename: str = None) -> Dict[str, Any]:
         """
         处理PDF文档并创建问答系统
         返回处理结果和文档信息
@@ -321,7 +321,10 @@ class QianwenPaperQAAPI:
                 # 生成文档嵌入
                 logger.info("生成文档嵌入...")
                 all_texts = [doc.page_content for doc in chunks]
-                all_metadatas = [doc.metadata for doc in chunks]
+                all_metadatas = [{
+                    **doc.metadata,
+                    'source_file': original_filename or os.path.basename(pdf_path)
+                } for doc in chunks]
                 
                 vector_store = self.create_vector_store_with_batches(
                     all_texts, all_metadatas, self.embeddings, config.BATCH_SIZE, config.MAX_RETRIES, pdf_hash
@@ -354,7 +357,7 @@ class QianwenPaperQAAPI:
             # 更新文档信息
             self.current_document = pdf_path
             self.document_info = {
-                'file_name': os.path.basename(pdf_path),
+                'file_name': original_filename or os.path.basename(pdf_path),
                 'file_path': pdf_path,
                 'file_hash': pdf_hash,
                 'pages_count': pages_count,
@@ -446,7 +449,7 @@ class QianwenPaperQAAPI:
             'document_info': self.document_info if self.qa_chain else None
         }
     
-    def add_document(self, pdf_path: str) -> Dict[str, Any]:
+    def add_document(self, pdf_path: str, original_filename: str = None) -> Dict[str, Any]:
         """
         向现有向量存储中添加新文档（仅支持ChromaDB）
         """
@@ -496,7 +499,7 @@ class QianwenPaperQAAPI:
             all_texts = [doc.page_content for doc in chunks]
             all_metadatas = [{
                 **doc.metadata,
-                'source_file': os.path.basename(pdf_path),
+                'source_file': original_filename or os.path.basename(pdf_path),
                 'added_at': time.time()
             } for doc in chunks]
             
@@ -525,7 +528,7 @@ class QianwenPaperQAAPI:
             # 更新文档信息
             processing_time = time.time() - start_time
             added_doc_info = {
-                'file_name': os.path.basename(pdf_path),
+                'file_name': original_filename or os.path.basename(pdf_path),
                 'file_path': pdf_path,
                 'pages_count': pages_count,
                 'chunks_count': chunks_count,
