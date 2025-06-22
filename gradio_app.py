@@ -4,6 +4,7 @@ import os
 import time
 from typing import List, Tuple, Optional
 from qianwen_paper_qa_api import QianwenPaperQAAPI, config
+from chat_history_db import ChatHistoryDB
 import logging
 
 # 配置日志
@@ -19,6 +20,8 @@ class GradioRAGApp:
         self.documents = {}  # 存储多个文档 {doc_id: document_info}
         self.current_doc_id = None
         self.vector_store_type = "chroma"  # 默认使用ChromaDB
+        self.db = ChatHistoryDB()  # 初始化数据库
+        self.current_session_id = None  # 当前会话ID
     
     def initialize_api(self, api_key: str, vector_store_type: str) -> Tuple[str, bool]:
         """初始化API"""
@@ -101,6 +104,12 @@ class GradioRAGApp:
             if processed_docs:
                 if is_first_upload:
                     self.chat_history = []  # 重置聊天历史
+                    # 创建新的会话
+                    doc_info = self.documents[list(self.documents.keys())[0]] if self.documents else None
+                    self.current_session_id = self.db.create_session(
+                        document_info=doc_info,
+                        vector_store_type=self.vector_store_type
+                    )
                     
                 info_text = f"""
 📄 **文档处理结果**
@@ -135,9 +144,25 @@ class GradioRAGApp:
             return self.chat_history, "❌ 请先上传PDF文档"
         
         try:
+            start_time = time.time()
             result = self.api.get_document_summary()
+            processing_time = time.time() - start_time
             
             if result['success']:
+                # 保存到数据库
+                if self.current_session_id:
+                    self.db.add_message(
+                        session_id=self.current_session_id,
+                        role="user",
+                        content="请总结这篇文档的主要内容"
+                    )
+                    self.db.add_message(
+                        session_id=self.current_session_id,
+                        role="assistant",
+                        content=result['answer'],
+                        processing_time=processing_time
+                    )
+                
                 # 添加到聊天历史
                 self.chat_history.append({
                     "role": "user",
@@ -166,9 +191,27 @@ class GradioRAGApp:
             return history, "❌ 请输入问题"
         
         try:
+            start_time = time.time()
             result = self.api.ask_question(question.strip())
+            processing_time = time.time() - start_time
             
             if result['success']:
+                # 保存到数据库
+                if self.current_session_id:
+                    # 保存用户问题
+                    self.db.add_message(
+                        session_id=self.current_session_id,
+                        role="user",
+                        content=question.strip()
+                    )
+                    # 保存助手回答
+                    self.db.add_message(
+                        session_id=self.current_session_id,
+                        role="assistant",
+                        content=result['answer'],
+                        processing_time=processing_time
+                    )
+                
                 # 更新聊天历史
                 self.chat_history.append({
                     "role": "user",
@@ -234,6 +277,106 @@ class GradioRAGApp:
         self.chat_history = []
         return [], ""
     
+    def get_session_history(self, session_id: str) -> Tuple[List, str]:
+        """加载指定会话的历史记录"""
+        if not session_id:
+            return [], "❌ 请选择一个会话"
+        
+        try:
+            messages = self.db.get_session_messages(session_id)
+            
+            # 转换为Gradio格式
+            history = []
+            for msg in messages:
+                history.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            self.chat_history = history
+            self.current_session_id = session_id
+            
+            return history, f"✅ 已加载会话历史（{len(messages)}条消息）"
+            
+        except Exception as e:
+            return [], f"❌ 加载会话历史失败: {str(e)}"
+    
+    def get_recent_sessions_list(self) -> str:
+        """获取最近会话列表"""
+        try:
+            sessions = self.db.get_recent_sessions(limit=20)
+            if not sessions:
+                return "📜 **历史会话：** 暂无历史记录"
+            
+            session_list = "📜 **最近会话：**\n\n"
+            for session in sessions:
+                msg_count = session['message_count']
+                updated_time = session['updated_at'][:16]  # 截取到分钟
+                doc_name = "未知文档"
+                if session['document_info']:
+                    doc_info = session['document_info']
+                    if isinstance(doc_info, str):
+                        import json
+                        try:
+                            doc_info = json.loads(doc_info)
+                        except:
+                            pass
+                    if isinstance(doc_info, dict) and 'file_name' in doc_info:
+                        doc_name = doc_info['file_name']
+                
+                session_list += f"🔸 **{session['session_name']}**\n"
+                session_list += f"   📄 文档: {doc_name}\n"
+                session_list += f"   💬 消息: {msg_count}条 | ⏰ {updated_time}\n"
+                session_list += f"   🆔 ID: `{session['session_id']}`\n\n"
+            
+            return session_list
+            
+        except Exception as e:
+            return f"❌ 获取会话列表失败: {str(e)}"
+    
+    def delete_session_by_id(self, session_id: str) -> str:
+        """删除指定会话"""
+        if not session_id or not session_id.strip():
+            return "❌ 请输入会话ID"
+        
+        try:
+            success = self.db.delete_session(session_id.strip())
+            if success:
+                if self.current_session_id == session_id.strip():
+                    self.current_session_id = None
+                    self.chat_history = []
+                return f"✅ 已删除会话: {session_id.strip()}"
+            else:
+                return f"❌ 删除失败，会话不存在: {session_id.strip()}"
+                
+        except Exception as e:
+            return f"❌ 删除会话失败: {str(e)}"
+    
+    def search_chat_history(self, query: str) -> str:
+        """搜索聊天历史"""
+        if not query or not query.strip():
+            return "❌ 请输入搜索关键词"
+        
+        try:
+            messages = self.db.search_messages(query.strip(), limit=20)
+            if not messages:
+                return f"🔍 **搜索结果：** 未找到包含 '{query.strip()}' 的消息"
+            
+            result = f"🔍 **搜索结果：** 找到 {len(messages)} 条相关消息\n\n"
+            
+            for msg in messages:
+                timestamp = msg['timestamp'][:16]
+                role_name = "👤 用户" if msg['role'] == 'user' else "🤖 助手"
+                content_preview = msg['content'][:100] + "..." if len(msg['content']) > 100 else msg['content']
+                
+                result += f"📍 **{msg['session_name']}** ({timestamp})\n"
+                result += f"{role_name}: {content_preview}\n\n"
+            
+            return result
+            
+        except Exception as e:
+            return f"❌ 搜索失败: {str(e)}"
+    
     def create_interface(self):
         """创建Gradio界面"""
         
@@ -293,6 +436,7 @@ class GradioRAGApp:
             - ✅ **ChromaDB动态管理**：随时添加/删除文档
             - ✅ **多文档批量处理**：同时上传多个PDF
             - ✅ **实时文档列表**：查看所有已加载文档
+            - ✅ **SQLite历史记录**：自动保存所有问答历史，支持搜索和回顾
             """)
             
             with gr.Row():
@@ -375,7 +519,7 @@ class GradioRAGApp:
                     
                     chatbot = gr.Chatbot(
                         label="问答历史",
-                        height=500,
+                        height=400,
                         elem_classes=["chat-container"],
                         type="messages"
                     )
@@ -396,6 +540,55 @@ class GradioRAGApp:
                     
                     with gr.Row():
                         clear_btn = gr.Button("清空对话", variant="secondary")
+                
+                with gr.Column(scale=1):
+                    # 历史记录管理区域
+                    gr.Markdown("### 📜 历史记录管理")
+                    
+                    # 会话列表
+                    sessions_display = gr.Markdown(
+                        value="点击'刷新会话列表'查看历史记录",
+                        elem_classes=["document-info"]
+                    )
+                    
+                    with gr.Row():
+                        refresh_sessions_btn = gr.Button("🔄 刷新会话列表", scale=2)
+                        
+                    # 会话操作
+                    with gr.Group():
+                        gr.Markdown("**🔧 会话操作**")
+                        
+                        session_id_input = gr.Textbox(
+                            label="会话ID",
+                            placeholder="输入会话ID...",
+                            scale=3
+                        )
+                        
+                        with gr.Row():
+                            load_session_btn = gr.Button("📖 加载会话", variant="secondary", scale=1)
+                            delete_session_btn = gr.Button("🗑️ 删除会话", variant="stop", scale=1)
+                    
+                    # 搜索功能
+                    with gr.Group():
+                        gr.Markdown("**🔍 搜索历史**")
+                        
+                        search_input = gr.Textbox(
+                            label="搜索关键词",
+                            placeholder="搜索聊天记录..."
+                        )
+                        
+                        search_btn = gr.Button("🔍 搜索", variant="secondary")
+                        
+                        search_results = gr.Markdown(
+                            value="输入关键词进行搜索",
+                            elem_classes=["document-info"]
+                        )
+                    
+                    # 操作状态
+                    history_status = gr.Textbox(
+                        label="操作状态",
+                        interactive=False
+                    )
             
             # 示例问题和使用说明
             gr.Markdown("""
@@ -497,6 +690,46 @@ class GradioRAGApp:
                 fn=self.clear_chat,
                 inputs=[],
                 outputs=[chatbot, question_status]
+            )
+            
+            # 历史记录管理事件绑定
+            
+            # 刷新会话列表
+            refresh_sessions_btn.click(
+                fn=self.get_recent_sessions_list,
+                inputs=[],
+                outputs=[sessions_display]
+            )
+            
+            # 加载会话
+            def handle_load_session(session_id):
+                history, status = self.get_session_history(session_id)
+                sessions_list = self.get_recent_sessions_list()
+                return history, status, sessions_list, ""  # 清空session_id输入框
+            
+            load_session_btn.click(
+                fn=handle_load_session,
+                inputs=[session_id_input],
+                outputs=[chatbot, history_status, sessions_display, session_id_input]
+            )
+            
+            # 删除会话
+            def handle_delete_session(session_id):
+                status = self.delete_session_by_id(session_id)
+                sessions_list = self.get_recent_sessions_list()
+                return status, sessions_list, ""  # 清空session_id输入框
+            
+            delete_session_btn.click(
+                fn=handle_delete_session,
+                inputs=[session_id_input],
+                outputs=[history_status, sessions_display, session_id_input]
+            )
+            
+            # 搜索历史
+            search_btn.click(
+                fn=self.search_chat_history,
+                inputs=[search_input],
+                outputs=[search_results]
             )
         
         return app
