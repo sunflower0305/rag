@@ -644,7 +644,7 @@ class GradioRAGApp:
                         choices=initial_sessions_options,
                         value=None,
                         label="📋 历史会话列表（点击选择会话）",
-                        info="选择一个会话来查看详情或加载对话"
+                        info="选择会话将自动加载对话"
                     )
                     
                     # 选中的会话ID（隐藏组件，用于传递数据）
@@ -667,7 +667,7 @@ class GradioRAGApp:
 📄 **最新文档：** {sessions_data[0].get('document_info', {}).get('file_name', '未知文档') if sessions_data[0].get('document_info') else '未知文档'}  
 
 ---
-💡 **操作提示：** 点击上方列表中的会话选项来查看详情和加载对话
+💡 **操作提示：** 点击上方列表中的会话选项将自动加载对话
                             """
                     
                     # 会话详情显示
@@ -677,10 +677,10 @@ class GradioRAGApp:
                         label="会话详情"
                     )
                     
-                    # 会话操作按钮
-                    with gr.Row():
-                        load_session_btn = gr.Button("📖 加载此会话", variant="primary", scale=2)
-                        delete_session_btn = gr.Button("🗑️ 删除此会话", variant="stop", scale=1)
+                    # 选中会话的操作区域（只在选中会话时显示）
+                    with gr.Row(visible=False) as session_action_row:
+                        gr.Markdown("✅ **会话已自动加载**")
+                        delete_session_btn = gr.Button("🗑️ 删除此会话", variant="stop", size="sm")
                     
                     # 搜索功能
                     with gr.Group():
@@ -722,7 +722,7 @@ class GradioRAGApp:
             - **FAISS模式**：高性能检索，但只支持单次批量上传
             - **上传方式**：可以一次选择多个PDF文件，也可以分多次上传
             - **文档限制**：仅支持PDF格式，建议单文件不超过100MB
-            - **历史管理**：自动加载历史会话，点击表格行选择并加载对话；支持关键词搜索
+            - **历史管理**：自动加载历史会话，点击选择会话即可加载对话；支持关键词搜索
             """)
             
             # 事件绑定
@@ -761,20 +761,20 @@ class GradioRAGApp:
 📄 **最新文档：** {sessions_data[0].get('document_info', {}).get('file_name', '未知文档') if sessions_data[0].get('document_info') else '未知文档'}  
 
 ---
-💡 **操作提示：** 点击上方列表中的会话选项来查看详情和加载对话
+💡 **操作提示：** 点击上方列表中的会话选项将自动加载对话
                         """
                     else:
                         updated_details = "请从上方列表中选择一个会话"
                     
                     return (status, info, gr.update(visible=visible), gr.update(value=doc_list, visible=visible), 
-                           gr.update(choices=options), updated_details)
+                           gr.update(choices=options), updated_details, gr.update(visible=False))
                 else:
-                    return status, info, gr.update(visible=visible), gr.update(value=doc_list, visible=visible), gr.update(), gr.update()
+                    return status, info, gr.update(visible=visible), gr.update(value=doc_list, visible=visible), gr.update(), gr.update(), gr.update()
             
             file_upload.upload(
                 fn=update_upload_status,
                 inputs=[file_upload],
-                outputs=[upload_status, document_info, summary_btn, document_list, sessions_radio, session_details],
+                outputs=[upload_status, document_info, summary_btn, document_list, sessions_radio, session_details, session_action_row],
                 show_progress=True
             )
             
@@ -831,57 +831,59 @@ class GradioRAGApp:
             
             # 历史记录管理事件绑定
             
-            # 会话Radio选择事件
+            # 会话Radio选择事件（自动加载会话）
             def on_session_radio_change(selected_option):
                 if selected_option and hasattr(self, '_session_option_map'):
                     try:
                         session_id = self._session_option_map.get(selected_option)
                         if session_id:
+                            # 自动加载会话历史
+                            history, load_status = self.get_session_history(session_id)
                             details = self.get_session_details(session_id)
-                            return details, session_id
+                            
+                            # 显示操作区域
+                            return (
+                                history,  # chatbot
+                                details,  # session_details  
+                                session_id,  # selected_session_id
+                                gr.update(visible=True),  # session_action_row
+                                f"✅ 已自动加载会话: {selected_option.split('|')[0].strip()}"  # history_status
+                            )
                         else:
-                            return "❌ 会话ID未找到", ""
+                            return [], "❌ 会话ID未找到", "", gr.update(visible=False), "❌ 会话ID未找到"
                     except Exception as e:
                         logger.error(f"选择会话失败: {e}")
-                        return "❌ 选择会话失败", ""
-                return "请选择一个会话", ""
+                        return [], "❌ 选择会话失败", "", gr.update(visible=False), "❌ 选择会话失败"
+                
+                # 没有选择时隐藏操作区域
+                return [], "请选择一个会话", "", gr.update(visible=False), ""
             
             sessions_radio.change(
                 fn=on_session_radio_change,
                 inputs=[sessions_radio],
-                outputs=[session_details, selected_session_id]
-            )
-            
-            # 加载会话
-            def handle_load_session(session_id):
-                if not session_id:
-                    return [], "❌ 请先选择一个会话", gr.update()
-                
-                history, status = self.get_session_history(session_id)
-                # 刷新会话列表
-                options = self.get_sessions_for_radio()
-                return history, status, gr.update(choices=options)
-            
-            load_session_btn.click(
-                fn=handle_load_session,
-                inputs=[selected_session_id],
-                outputs=[chatbot, history_status, sessions_radio]
+                outputs=[chatbot, session_details, selected_session_id, session_action_row, history_status]
             )
             
             # 删除会话
             def handle_delete_session(session_id):
                 if not session_id:
-                    return "❌ 请先选择一个会话", gr.update(), "请从上方列表中选择一个会话", ""
+                    return "❌ 请先选择一个会话", gr.update(), "请从上方列表中选择一个会话", "", gr.update(visible=False)
                 
                 status = self.delete_session_by_id(session_id)
                 # 刷新会话列表
                 options = self.get_sessions_for_radio()
-                return status, gr.update(choices=options, value=None), "请从上方列表中选择一个会话", ""
+                return (
+                    status,  # history_status
+                    gr.update(choices=options, value=None),  # sessions_radio
+                    "请从上方列表中选择一个会话",  # session_details
+                    "",  # selected_session_id
+                    gr.update(visible=False)  # session_action_row
+                )
             
             delete_session_btn.click(
                 fn=handle_delete_session,
                 inputs=[selected_session_id],
-                outputs=[history_status, sessions_radio, session_details, selected_session_id]
+                outputs=[history_status, sessions_radio, session_details, selected_session_id, session_action_row]
             )
             
             # 搜索历史
