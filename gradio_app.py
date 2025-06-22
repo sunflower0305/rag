@@ -273,10 +273,26 @@ class GradioRAGApp:
             height: 500px !important;
         }
         .document-info {
-            background-color: #f8f9fa;
+            background-color: var(--background-fill-secondary);
             padding: 15px;
             border-radius: 8px;
-            border-left: 4px solid #007bff;
+            border-left: 4px solid var(--color-accent);
+            color: var(--body-text-color);
+        }
+        .dark .document-info {
+            background-color: rgba(255, 255, 255, 0.05);
+            border-left-color: #4a9eff;
+            color: #ffffff;
+        }
+        /* 确保Markdown内容在暗色模式下可见 */
+        .dark .markdown {
+            color: #ffffff !important;
+        }
+        .dark .markdown strong {
+            color: #ffffff !important;
+        }
+        .dark .markdown h1, .dark .markdown h2, .dark .markdown h3 {
+            color: #ffffff !important;
         }
         .status-success {
             color: #28a745;
