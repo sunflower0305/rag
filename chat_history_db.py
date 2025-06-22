@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class ChatHistoryDB:
     """聊天历史数据库管理类"""
     
-    def __init__(self, db_path: str = "chat_history.db"):
+    def __init__(self, db_path: str = "sqlite/chat_history.db"):
         """
         初始化数据库连接
         
@@ -19,6 +19,8 @@ class ChatHistoryDB:
             db_path: 数据库文件路径
         """
         self.db_path = Path(db_path)
+        # 确保目录存在
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.init_database()
     
     def init_database(self):

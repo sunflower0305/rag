@@ -66,6 +66,7 @@ dmypy.json
 # Database
 qianwen_faiss_index/
 chroma_db/
+sqlite/
 
 # Cache
 pdf_embeddings_cache/

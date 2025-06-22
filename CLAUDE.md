@@ -52,6 +52,7 @@ python test_retrieval_only.py
 - **Embedding Caching**: Implements MD5-based caching system in `pdf_embeddings_cache/` directory to avoid regenerating embeddings
 - **Batch Processing**: Handles embeddings in batches of 4 with retry mechanism and exponential backoff
 - **Vector Storage**: Uses FAISS for efficient similarity search with persistent storage in `qianwen_faiss_index/`
+- **Chat History**: SQLite database for persistent chat history storage in `sqlite/chat_history.db`
 
 ### API Configuration
 
@@ -74,9 +75,11 @@ The system uses Alibaba Cloud's DashScope API through OpenAI-compatible endpoint
 ### Dependencies
 
 - **Core**: langchain, langchain-community, langchain-openai, openai
-- **Vector DB**: faiss-cpu
+- **Vector DB**: faiss-cpu, langchain-chroma
 - **PDF Processing**: pypdf
 - **Environment**: python-dotenv
+- **Database**: sqlite3 (built-in)
+- **UI**: gradio
 - **Special**: langchain-dashscope for native integration (used in some files)
 
 ## Important Notes
