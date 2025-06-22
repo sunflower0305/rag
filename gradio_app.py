@@ -35,7 +35,7 @@ class GradioRAGApp:
         except Exception as e:
             return f"❌ API初始化失败: {str(e)}", False
     
-    def upload_documents(self, files, is_first_upload=True) -> Tuple[str, str, bool, str]:
+    def upload_documents(self, files) -> Tuple[str, str, bool, str]:
         """上传并处理多个PDF文档"""
         if not self.api:
             return "❌ 请先输入API密钥并初始化", "", False, ""
@@ -45,6 +45,9 @@ class GradioRAGApp:
         
         processed_docs = []
         failed_docs = []
+        
+        # 判断是首次上传还是追加上传
+        is_first_upload = not self.documents  # 如果没有现有文档，则为首次上传
         
         try:
             for i, file in enumerate(files):
@@ -58,14 +61,23 @@ class GradioRAGApp:
                             tmp_file.write(f.read())
                         tmp_file_path = tmp_file.name
                     
-                    # 对于第一个文档或单独上传，使用process_document
-                    # 对于后续文档，使用add_document（仅ChromaDB支持）
+                    # 智能选择处理方式
                     if i == 0 and is_first_upload:
+                        # 第一个文档且是首次上传：初始化向量存储
                         result = self.api.process_document(tmp_file_path, original_filename)
-                    elif self.vector_store_type == "chroma" and not is_first_upload:
+                    elif self.vector_store_type == "chroma":
+                        # ChromaDB模式：添加到现有向量存储
                         result = self.api.add_document(tmp_file_path, original_filename)
-                    else:
+                    elif self.vector_store_type == "faiss" and not is_first_upload:
+                        # FAISS模式且不是首次上传：重置并重新初始化
+                        failed_docs.append(f"{original_filename}: FAISS模式不支持追加文档，将重置文档库")
                         result = self.api.process_document(tmp_file_path, original_filename)
+                        # 清空现有文档记录，因为FAISS会重置
+                        self.documents = {}
+                    else:
+                        # FAISS模式批量上传多个文档：跳过后续文档
+                        failed_docs.append(f"{original_filename}: FAISS模式不支持批量上传多个文档，请使用ChromaDB模式")
+                        continue
                     
                     # 清理临时文件
                     try:
@@ -192,51 +204,6 @@ class GradioRAGApp:
         except Exception as e:
             return f"获取文档列表失败: {str(e)}"
     
-    def add_single_document(self, file) -> Tuple[str, str]:
-        """添加单个文档（仅ChromaDB支持）"""
-        if not self.api:
-            return "❌ 请先初始化API", ""
-        
-        if self.vector_store_type != "chroma":
-            return "❌ 动态添加文档仅支持ChromaDB", ""
-        
-        if not file:
-            return "❌ 请选择PDF文件", ""
-        
-        try:
-            # 获取原始文件名
-            original_filename = os.path.basename(file)
-            
-            # 处理文件
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-                with open(file, 'rb') as f:
-                    tmp_file.write(f.read())
-                tmp_file_path = tmp_file.name
-            
-            # 添加文档
-            result = self.api.add_document(tmp_file_path, original_filename)
-            
-            # 清理临时文件
-            try:
-                os.unlink(tmp_file_path)
-            except:
-                pass
-            
-            if result['success']:
-                doc_info = result['document_info']
-                # 更新文档列表
-                doc_list = self.get_document_list()
-                return f"✅ 成功添加文档: {doc_info['file_name']} ({doc_info['chunks_count']} 个文本块)", doc_list
-            else:
-                return f"❌ 添加文档失败: {result['message']}", ""
-                
-        except Exception as e:
-            try:
-                if 'tmp_file_path' in locals():
-                    os.unlink(tmp_file_path)
-            except:
-                pass
-            return f"❌ 添加文档失败: {str(e)}", ""
     
     def delete_document(self, filename: str) -> Tuple[str, str]:
         """删除文档（仅ChromaDB支持）"""
@@ -316,10 +283,16 @@ class GradioRAGApp:
             
             基于阿里云千问大模型的PDF文档问答系统，支持ChromaDB动态文档管理和FAISS传统模式。
             
-            **🎆 新功能：**
-            - ✅ ChromaDB支持：动态添加/删除文档
-            - ✅ 多文档管理：同时处理多个PDF
-            - ✅ 实时文档列表：查看已加载文档
+            **📋 使用步骤：**
+            1. 🔑 输入DashScope API密钥并选择向量存储类型
+            2. 📄 上传PDF文档（支持批量上传）
+            3. 💬 开始智能问答
+            
+            **🎆 功能特色：**
+            - ✅ **统一文档管理**：一个界面处理所有文档操作
+            - ✅ **ChromaDB动态管理**：随时添加/删除文档
+            - ✅ **多文档批量处理**：同时上传多个PDF
+            - ✅ **实时文档列表**：查看所有已加载文档
             """)
             
             with gr.Row():
@@ -344,39 +317,27 @@ class GradioRAGApp:
                     init_btn = gr.Button("初始化API", variant="primary")
                     api_status = gr.Textbox(label="API状态", interactive=False)
                     
-                    # 文档上传区域
-                    gr.Markdown("### 📄 文档上传")
+                    # 文档管理区域
+                    gr.Markdown("### 📄 文档管理")
                     
-                    file_upload = gr.File(
-                        label="上传PDF文档（初始化）",
-                        file_types=[".pdf"],
-                        file_count="multiple",
-                        visible=False
-                    )
-                    
-                    upload_status = gr.Textbox(label="上传状态", interactive=False)
-                    
-                    # 文档信息显示
-                    document_info = gr.Markdown(
-                        label="文档信息",
-                        visible=False,
-                        elem_classes=["document-info"]
-                    )
-                    
-                    # 动态文档管理区域（仅ChromaDB）
-                    with gr.Group(visible=False) as dynamic_docs_group:
-                        gr.Markdown("### 🔄 动态文档管理 (ChromaDB)")
-                        
-                        # 添加文档
-                        add_file_upload = gr.File(
-                            label="添加新PDF文档",
+                    # 统一的文档上传区域
+                    with gr.Group(visible=False) as document_management_group:
+                        # 智能文档上传（支持单个或批量）
+                        file_upload = gr.File(
+                            label="📁 上传PDF文档（支持单个或多个文件）",
                             file_types=[".pdf"],
-                            file_count="single"
+                            file_count="multiple"
                         )
-                        add_doc_status = gr.Textbox(label="添加状态", interactive=False)
                         
-                        # 删除文档
-                        with gr.Row():
+                        gr.Markdown("""
+                        **📋 上传说明：**
+                        - **首次上传**：可以选择一个或多个PDF文件
+                        - **追加文档**：可以继续上传新文档（ChromaDB模式支持，FAISS模式会重置）
+                        - **文件限制**：仅支持PDF格式，建议单文件不超过100MB
+                        """)
+                        
+                        # 文档删除（ChromaDB）
+                        with gr.Row(visible=False) as delete_row:
                             delete_filename = gr.Textbox(
                                 label="要删除的文件名",
                                 placeholder="例如: document.pdf",
@@ -384,7 +345,15 @@ class GradioRAGApp:
                             )
                             delete_btn = gr.Button("🗑️ 删除文档", variant="stop", scale=1)
                         
-                        delete_status = gr.Textbox(label="删除状态", interactive=False)
+                        # 统一的状态显示
+                        upload_status = gr.Textbox(label="操作状态", interactive=False)
+                        
+                        # 文档信息显示
+                        document_info = gr.Markdown(
+                            label="文档信息",
+                            visible=False,
+                            elem_classes=["document-info"]
+                        )
                     
                     # 文档列表显示
                     document_list = gr.Markdown(
@@ -428,18 +397,24 @@ class GradioRAGApp:
                     with gr.Row():
                         clear_btn = gr.Button("清空对话", variant="secondary")
             
-            # 示例问题
+            # 示例问题和使用说明
             gr.Markdown("""
             ### 💡 示例问题
-            **单文档问题：**
+            **📖 单文档分析：**
             - 这篇文档的主要研究内容是什么？
             - 文档中提到了哪些关键技术或方法？
             - 有什么重要的结论或发现？
             
-            **多文档问题（ChromaDB）：**
+            **🗂️ 多文档对比（ChromaDB模式）：**
             - 这些文档有什么共同点或区别？
             - 请比较不同文档中的观点
             - 总结所有文档的核心内容
+            
+            ### 📝 使用说明
+            - **ChromaDB模式**：支持多次上传、动态添加/删除文档，推荐使用
+            - **FAISS模式**：高性能检索，但只支持单次批量上传
+            - **上传方式**：可以一次选择多个PDF文件，也可以分多次上传
+            - **文档限制**：仅支持PDF格式，建议单文件不超过100MB
             """)
             
             # 事件绑定
@@ -447,37 +422,29 @@ class GradioRAGApp:
             # API初始化
             def update_file_visibility(api_key, vector_store_type):
                 status, visible = self.initialize_api(api_key, vector_store_type)
-                dynamic_visible = visible and vector_store_type == "chroma"
-                return status, gr.update(visible=visible), gr.update(visible=dynamic_visible)
+                is_chroma = vector_store_type == "chroma"
+                return (
+                    status, 
+                    gr.update(visible=visible),  # document_management_group
+                    gr.update(visible=visible and is_chroma)   # delete_row
+                )
             
             init_btn.click(
                 fn=update_file_visibility,
                 inputs=[api_key_input, vector_store_choice],
-                outputs=[api_status, file_upload, dynamic_docs_group],
+                outputs=[api_status, document_management_group, delete_row],
                 show_progress=True
             )
             
-            # 文档上传
+            # 文档上传（智能处理）
             def update_upload_status(files):
-                status, info, visible, doc_list = self.upload_documents(files, is_first_upload=True)
+                status, info, visible, doc_list = self.upload_documents(files)
                 return status, info, gr.update(visible=visible), gr.update(value=doc_list, visible=visible)
             
             file_upload.upload(
                 fn=update_upload_status,
                 inputs=[file_upload],
                 outputs=[upload_status, document_info, summary_btn, document_list],
-                show_progress=True
-            )
-            
-            # 添加单个文档
-            def handle_add_document(file):
-                status, doc_list = self.add_single_document(file)
-                return status, doc_list
-            
-            add_file_upload.upload(
-                fn=handle_add_document,
-                inputs=[add_file_upload],
-                outputs=[add_doc_status, document_list],
                 show_progress=True
             )
             
@@ -489,7 +456,7 @@ class GradioRAGApp:
             delete_btn.click(
                 fn=handle_delete_document,
                 inputs=[delete_filename],
-                outputs=[delete_status, document_list, delete_filename],
+                outputs=[upload_status, document_list, delete_filename],
                 show_progress=True
             )
             
