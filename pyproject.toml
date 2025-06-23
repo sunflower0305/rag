@@ -13,6 +13,9 @@ dependencies = [
     "faiss-cpu>=1.11.0",
     "pypdf>=5.6.0",
     "gradio>=5.34.2",
-    "chromadb>=0.4.0",
-    "langchain-chroma>=0.1.0",
+    "chromadb>=1.0.13",
+    "langchain-chroma>=0.2.4",
+    "authlib>=1.6.0",
+    "python-jose>=3.5.0",
+    "langchain-dashscope==0.1.8",
 ]

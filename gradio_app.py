@@ -2,9 +2,10 @@ import gradio as gr
 import tempfile
 import os
 import time
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from qianwen_paper_qa_api import QianwenPaperQAAPI, config
 from chat_history_db import ChatHistoryDB
+from github_auth import auth_router, get_current_user, github_auth
 import logging
 
 # 配置日志
@@ -23,6 +24,32 @@ class GradioRAGApp:
         self.db = ChatHistoryDB()  # 初始化数据库
         self.current_session_id = None  # 当前会话ID
         self._session_option_map = {}  # 存储选项到session_id的映射
+        self.current_user = None  # 当前登录用户
+    
+    def set_current_user(self, user_data: Dict[str, Any]) -> None:
+        """设置当前用户"""
+        self.current_user = user_data
+        if user_data:
+            # 更新数据库中的用户信息
+            self.db.upsert_user(
+                user_id=user_data['user_id'],
+                username=user_data['username'],
+                name=user_data.get('name'),
+                email=user_data.get('email'),
+                avatar_url=user_data.get('avatar_url')
+            )
+    
+    def get_current_user_id(self) -> Optional[int]:
+        """获取当前用户ID"""
+        return self.current_user['user_id'] if self.current_user else None
+    
+    def get_user_display_info(self) -> str:
+        """获取用户显示信息"""
+        if not self.current_user:
+            return "👤 匿名用户"
+        
+        name = self.current_user.get('name') or self.current_user['username']
+        return f"👤 {name} (@{self.current_user['username']})"
     
     def initialize_api(self, api_key: str, vector_store_type: str) -> Tuple[str, bool]:
         """初始化API"""
@@ -35,9 +62,44 @@ class GradioRAGApp:
             self.vector_store_type = vector_store_type
             
             self.api = QianwenPaperQAAPI(api_key=api_key.strip())
+            
+            # 如果用户已登录，保存API密钥到数据库
+            if self.current_user:
+                user_id = self.current_user['user_id']
+                success = self.db.update_user_api_key(user_id, api_key.strip())
+                if success:
+                    logger.info(f"已保存用户 {self.current_user['username']} 的API密钥")
+                else:
+                    logger.warning(f"保存用户 {self.current_user['username']} 的API密钥失败")
+            
             return f"✅ API初始化成功（使用{vector_store_type.upper()}），可以上传PDF文档了", True
         except Exception as e:
             return f"❌ API初始化失败: {str(e)}", False
+    
+    def get_user_api_key(self) -> Optional[str]:
+        """获取当前用户的API密钥"""
+        if not self.current_user:
+            return None
+        
+        user_id = self.current_user['user_id']
+        return self.db.get_user_api_key(user_id)
+    
+    def auto_initialize_api_for_user(self) -> Tuple[str, bool]:
+        """为登录用户自动初始化API（如果有保存的密钥）"""
+        if not self.current_user:
+            return "未登录用户", False
+        
+        api_key = self.get_user_api_key()
+        if not api_key:
+            return "该用户未保存API密钥", False
+        
+        try:
+            # 使用用户保存的API密钥初始化
+            config.VECTOR_STORE_TYPE = self.vector_store_type
+            self.api = QianwenPaperQAAPI(api_key=api_key)
+            return f"✅ 已使用您保存的API密钥自动初始化（使用{self.vector_store_type.upper()}）", True
+        except Exception as e:
+            return f"❌ 使用保存的API密钥初始化失败: {str(e)}", False
     
     def upload_documents(self, files) -> Tuple[str, str, bool, str]:
         """上传并处理多个PDF文档"""
@@ -109,7 +171,8 @@ class GradioRAGApp:
                     doc_info = self.documents[list(self.documents.keys())[0]] if self.documents else None
                     self.current_session_id = self.db.create_session(
                         document_info=doc_info,
-                        vector_store_type=self.vector_store_type
+                        vector_store_type=self.vector_store_type,
+                        user_id=self.get_current_user_id()
                     )
                     
                 info_text = f"""
@@ -343,7 +406,9 @@ class GradioRAGApp:
     def get_sessions_for_radio(self) -> List[str]:
         """获取会话选项列表（用于Radio组件）"""
         try:
-            sessions = self.db.get_recent_sessions(limit=20)
+            # 只获取当前用户的会话
+            user_id = self.get_current_user_id()
+            sessions = self.db.get_recent_sessions(limit=20, user_id=user_id)
             if not sessions:
                 return []
             
@@ -448,7 +513,9 @@ class GradioRAGApp:
             return "❌ 请输入搜索关键词"
         
         try:
-            messages = self.db.search_messages(query.strip(), limit=20)
+            # 只搜索当前用户的消息
+            user_id = self.get_current_user_id()
+            messages = self.db.search_messages(query.strip(), user_id=user_id, limit=20)
             if not messages:
                 return f"🔍 **搜索结果：** 未找到包含 '{query.strip()}' 的消息"
             
@@ -511,18 +578,50 @@ class GradioRAGApp:
         """
         
         with gr.Blocks(css=css, title="千问RAG问答系统", theme=gr.themes.Soft()) as app:
+            # 添加用户认证状态组件
+            user_info_display = gr.Markdown(
+                value=self.get_user_display_info(),
+                label="用户状态"
+            )
+            
+            # 用户认证控制区域
+            with gr.Row():
+                with gr.Column(scale=3):
+                    gr.Markdown("""
+                    # 🤖 千问RAG智能问答系统
+                    
+                    基于阿里云千问大模型的PDF文档问答系统，支持ChromaDB动态文档管理和FAISS传统模式。
+                    """)
+                
+                with gr.Column(scale=1):
+                    # GitHub OAuth 状态显示
+                    if github_auth.is_configured():
+                        auth_status = gr.Markdown("""
+🔐 **GitHub 登录可用**
+
+🔗 [点击登录GitHub](http://localhost:8001/auth/github)
+
+⚠️ 需要先启动OAuth服务：`python gradio_oauth_app.py`
+                        """)
+                        logout_btn = gr.Button("🚪 登出", size="sm", variant="stop", visible=False)
+                        github_login_btn = gr.Button("刷新登录状态", size="sm", variant="secondary")
+                    else:
+                        auth_status = gr.Markdown("⚠️ **GitHub OAuth 未配置**")
+                        github_login_btn = gr.Button("GitHub 登录", size="sm", visible=False)
+                        logout_btn = gr.Button("登出", size="sm", visible=False)
+            
             gr.Markdown("""
-            # 🤖 千问RAG智能问答系统
-            
-            基于阿里云千问大模型的PDF文档问答系统，支持ChromaDB动态文档管理和FAISS传统模式。
-            
             **📋 使用步骤：**
-            1. 🔑 输入DashScope API密钥并选择向量存储类型
-            2. 📄 上传PDF文档（支持批量上传）
-            3. 💬 开始智能问答
-            4. 📜 在右侧历史记录中查看和管理对话
+            1. 🔗 （可选）GitHub登录以启用个人数据管理
+            2. 🔑 输入并保存DashScope API密钥，选择向量存储类型  
+            3. 📄 上传PDF文档（支持批量上传）
+            4. 💬 开始智能问答
+            5. 📜 在右侧查看和管理个人对话历史
             
             **🎆 功能特色：**
+            - ✅ **GitHub OAuth 登录**：多用户支持，完全的数据隔离保护
+            - ✅ **加密密钥存储**：用户API密钥安全加密保存，自动恢复
+            - ✅ **个人数据管理**：每个用户独立的会话历史和设置
             - ✅ **统一文档管理**：一个界面处理所有文档操作
             - ✅ **ChromaDB动态管理**：随时添加/删除文档
             - ✅ **多文档批量处理**：同时上传多个PDF
@@ -534,12 +633,24 @@ class GradioRAGApp:
                 with gr.Column(scale=1):
                     # API密钥输入区域
                     gr.Markdown("### 🔑 API设置")
-                    api_key_input = gr.Textbox(
-                        label="DashScope API密钥",
-                        type="password",
-                        placeholder="请输入阿里云DashScope API密钥",
-                        info="获取API密钥: https://dashscope.console.aliyun.com/"
-                    )
+                    
+                    with gr.Row():
+                        api_key_input = gr.Textbox(
+                            label="DashScope API密钥",
+                            type="password",
+                            placeholder="请输入阿里云DashScope API密钥",
+                            info="获取API密钥: https://dashscope.console.aliyun.com/",
+                            scale=3
+                        )
+                        auto_fill_btn = gr.Button("🔄 使用保存的密钥", size="sm", scale=1)
+                        save_key_btn = gr.Button("💾 保存密钥", size="sm", scale=1)
+                    
+                    gr.Markdown("""
+**💡 API密钥管理说明：**
+- **💾 保存密钥**：仅保存API密钥到用户账户（登录用户）
+- **初始化API**：保存密钥并立即初始化RAG系统
+- **🔄 使用保存的密钥**：自动填充已保存的密钥
+                    """)
                     
                     # 向量存储类型选择
                     vector_store_choice = gr.Radio(
@@ -633,18 +744,34 @@ class GradioRAGApp:
                         clear_btn = gr.Button("清空对话", variant="secondary")
                 
                 with gr.Column(scale=1):
+                    # 用户设置区域（只在登录时显示）
+                    with gr.Group(visible=False) as user_settings_group:
+                        gr.Markdown("### ⚙️ 用户设置")
+                        
+                        with gr.Row():
+                            current_api_display = gr.Textbox(
+                                label="当前保存的API密钥",
+                                type="password",
+                                value="",
+                                interactive=False,
+                                scale=3
+                            )
+                            clear_api_btn = gr.Button("🗑️ 清除", size="sm", scale=1)
+                        
+                        gr.Markdown("💡 **提示：** 登录用户的API密钥会自动加密保存，下次登录时自动加载")
+                    
                     # 历史记录管理区域
                     gr.Markdown("### 📜 历史记录管理")
                     
-                    # 初始化会话选项
+                    # 初始化会话选项（只显示当前用户的会话）
                     initial_sessions_options = self.get_sessions_for_radio()
                     
                     # 会话列表（使用Radio显示）
                     sessions_radio = gr.Radio(
                         choices=initial_sessions_options,
                         value=None,
-                        label="📋 历史会话列表（点击选择会话）",
-                        info="选择会话将自动加载对话"
+                        label="📋 我的历史会话（点击选择会话）",
+                        info="选择会话将自动加载对话，只显示您的会话记录"
                     )
                     
                     # 选中的会话ID（隐藏组件，用于传递数据）
@@ -656,13 +783,15 @@ class GradioRAGApp:
                     # 初始会话详情显示
                     initial_details_text = "请从上方列表中选择一个会话"
                     if initial_sessions_options:
-                        # 从数据库获取统计信息
-                        sessions_data = self.db.get_recent_sessions(limit=20)
+                        # 从数据库获取当前用户的统计信息
+                        user_id = self.get_current_user_id()
+                        sessions_data = self.db.get_recent_sessions(limit=20, user_id=user_id)
                         if sessions_data:
+                            user_info = "您的" if self.current_user else "全部"
                             initial_details_text = f"""
-### 📊 历史记录统计
+### 📊 {user_info}历史记录统计
 
-📋 **总会话数：** {len(sessions_data)}个  
+📋 **会话数：** {len(sessions_data)}个  
 🕒 **最新会话：** {sessions_data[0]['session_name']}  
 📄 **最新文档：** {sessions_data[0].get('document_info', {}).get('file_name', '未知文档') if sessions_data[0].get('document_info') else '未知文档'}  
 
@@ -714,14 +843,129 @@ class GradioRAGApp:
             - 总结所有文档的核心内容
             
             ### 📝 使用说明
+            - **GitHub登录**：登录后享受个人数据管理和API密钥自动保存
+            - **API密钥管理**：支持保存、自动填充、清除等完整的密钥管理功能
             - **ChromaDB模式**：支持多次上传、动态添加/删除文档，推荐使用
             - **FAISS模式**：高性能检索，但只支持单次批量上传
             - **上传方式**：可以一次选择多个PDF文件，也可以分多次上传
             - **文档限制**：仅支持PDF格式，建议单文件不超过100MB
-            - **历史管理**：自动加载历史会话，点击选择会话即可加载对话；输入关键词按回车搜索
+            - **历史管理**：个人会话自动隔离，支持搜索和会话管理
             """)
             
             # 事件绑定
+            
+            # 用户认证相关事件
+            def handle_refresh_login_status(request: gr.Request):
+                """刷新登录状态"""
+                if github_auth.is_configured():
+                    try:
+                        # 检查当前用户状态
+                        user_data = get_current_user(request)
+                        if user_data:
+                            self.set_current_user(user_data)
+                            
+                            # 尝试自动初始化API
+                            api_status_msg = ""
+                            api_init_status = False
+                            auto_init_msg, api_init_status = self.auto_initialize_api_for_user()
+                            
+                            if api_init_status:
+                                api_status_msg = f"\n🔑 {auto_init_msg}"
+                            else:
+                                api_status_msg = f"\n⚠️ {auto_init_msg}，请手动输入API密钥"
+                            
+                            # 刷新会话列表
+                            options = self.get_sessions_for_radio()
+                            
+                            # 检查是否有保存的API密钥
+                            has_saved_key = self.get_user_api_key() is not None
+                            
+                            # 更新用户设置显示
+                            settings_visible, current_key_display = update_user_settings_display()
+                            
+                            return (
+                                self.get_user_display_info(),  # user_info_display
+                                gr.update(visible=False),  # github_login_btn
+                                gr.update(visible=True),   # logout_btn
+                                gr.update(choices=options), # sessions_radio
+                                f"""
+🔐 **已登录 GitHub**
+
+👤 **用户：** {user_data.get('name', user_data['username'])} (@{user_data['username']})
+
+🔑 **API状态：** {'已保存密钥' if has_saved_key else '未保存密钥'}{api_status_msg}
+
+🚪 点击"登出"按钮可退出登录
+                                """,  # auth_status
+                                settings_visible,  # user_settings_group
+                                current_key_display  # current_api_display
+                            )
+                        else:
+                            return (
+                                "👤 匿名用户",  # user_info_display
+                                gr.update(visible=True),   # github_login_btn
+                                gr.update(visible=False),  # logout_btn
+                                gr.update(),  # sessions_radio
+                                """
+🔐 **GitHub 登录可用**
+
+🔗 [点击登录GitHub](http://localhost:8001/auth/github)
+
+⚠️ 需要先启动OAuth服务：`python gradio_oauth_app.py`
+                                """,  # auth_status
+                                gr.update(visible=False),  # user_settings_group
+                                ""  # current_api_display
+                            )
+                    except Exception as e:
+                        logger.error(f"刷新登录状态失败: {e}")
+                        return (
+                            "👤 匿名用户",
+                            gr.update(visible=True),
+                            gr.update(visible=False),
+                            gr.update(),
+                            f"❌ 检查登录状态失败: {str(e)}",
+                            gr.update(visible=False),
+                            ""
+                        )
+                else:
+                    return (
+                        "👤 匿名用户",
+                        gr.update(visible=False),
+                        gr.update(visible=False),
+                        gr.update(),
+                        "⚠️ **GitHub OAuth 未配置**",
+                        gr.update(visible=False),
+                        ""
+                    )
+            
+            def handle_logout():
+                """处理登出"""
+                self.current_user = None
+                self.chat_history = []
+                self.current_session_id = None
+                # 刷新会话列表
+                options = self.get_sessions_for_radio()
+                return (
+                    "👤 匿名用户",  # user_info_display
+                    gr.update(visible=True),  # github_login_btn
+                    gr.update(visible=False),  # logout_btn
+                    [],  # chatbot
+                    gr.update(choices=options, value=None),  # sessions_radio
+                    "✅ 已成功登出"  # history_status
+                )
+            
+            if github_auth.is_configured():
+                github_login_btn.click(
+                    fn=handle_refresh_login_status,
+                    inputs=[],
+                    outputs=[user_info_display, github_login_btn, logout_btn, sessions_radio, auth_status, user_settings_group, current_api_display]
+                )
+                
+                logout_btn.click(
+                    fn=handle_logout,
+                    inputs=[],
+                    outputs=[user_info_display, github_login_btn, logout_btn, chatbot, sessions_radio, history_status]
+                )
             
             # API初始化
             def update_file_visibility(api_key, vector_store_type):
@@ -733,10 +977,88 @@ class GradioRAGApp:
                     gr.update(visible=visible and is_chroma)   # delete_row
                 )
             
+            # 自动填充用户保存的API密钥
+            def auto_fill_api_key():
+                """自动填充用户保存的API密钥"""
+                if self.current_user:
+                    saved_key = self.get_user_api_key()
+                    if saved_key:
+                        return saved_key, "✅ 已自动填充您保存的API密钥"
+                    else:
+                        return "", "该用户未保存API密钥"
+                else:
+                    return "", "请先登录"
+            
+            # 保存用户API密钥
+            def save_user_api_key(api_key):
+                """保存用户API密钥"""
+                if not self.current_user:
+                    return "请先登录", ""
+                
+                if not api_key or not api_key.strip():
+                    return "❌ 请输入有效的API密钥", ""
+                
+                user_id = self.current_user['user_id']
+                success = self.db.update_user_api_key(user_id, api_key.strip())
+                if success:
+                    # 更新用户设置显示
+                    display_key = api_key.strip()[:8] + "..." + api_key.strip()[-4:] if len(api_key.strip()) > 12 else api_key.strip()
+                    return "✅ API密钥已保存", display_key
+                else:
+                    return "❌ 保存API密钥失败", ""
+            
+            # 清除用户保存的API密钥
+            def clear_user_api_key():
+                """清除用户保存的API密钥"""
+                if not self.current_user:
+                    return "", "请先登录"
+                
+                user_id = self.current_user['user_id']
+                success = self.db.update_user_api_key(user_id, "")
+                if success:
+                    return "", "✅ 已清除保存的API密钥"
+                else:
+                    return "", "❌ 清除API密钥失败"
+            
+            # 更新用户设置显示
+            def update_user_settings_display():
+                """更新用户设置显示"""
+                if not self.current_user:
+                    return gr.update(visible=False), ""
+                
+                saved_key = self.get_user_api_key()
+                display_key = saved_key[:8] + "..." + saved_key[-4:] if saved_key and len(saved_key) > 12 else saved_key or ""
+                
+                return gr.update(visible=True), display_key
+            
             init_btn.click(
                 fn=update_file_visibility,
                 inputs=[api_key_input, vector_store_choice],
                 outputs=[api_status, document_management_group, delete_row],
+                show_progress=True
+            )
+            
+            # 自动填充API密钥按钮
+            auto_fill_btn.click(
+                fn=auto_fill_api_key,
+                inputs=[],
+                outputs=[api_key_input, api_status],
+                show_progress=True
+            )
+            
+            # 保存API密钥按钮
+            save_key_btn.click(
+                fn=save_user_api_key,
+                inputs=[api_key_input],
+                outputs=[api_status, current_api_display],
+                show_progress=True
+            )
+            
+            # 清除API密钥按钮
+            clear_api_btn.click(
+                fn=clear_user_api_key,
+                inputs=[],
+                outputs=[current_api_display, api_status],
                 show_progress=True
             )
             
@@ -746,13 +1068,15 @@ class GradioRAGApp:
                 # 如果上传成功，自动刷新历史记录
                 if visible:
                     options = self.get_sessions_for_radio()
-                    # 更新会话统计
-                    sessions_data = self.db.get_recent_sessions(limit=20)
+                    # 更新会话统计（按用户过滤）
+                    user_id = self.get_current_user_id()
+                    sessions_data = self.db.get_recent_sessions(limit=20, user_id=user_id)
                     if sessions_data:
+                        user_info = "您的" if self.current_user else "全部"
                         updated_details = f"""
-### 📊 历史记录统计
+### 📊 {user_info}历史记录统计
 
-📋 **总会话数：** {len(sessions_data)}个  
+📋 **会话数：** {len(sessions_data)}个  
 🕒 **最新会话：** {sessions_data[0]['session_name']}  
 📄 **最新文档：** {sessions_data[0].get('document_info', {}).get('file_name', '未知文档') if sessions_data[0].get('document_info') else '未知文档'}  
 
@@ -896,7 +1220,26 @@ class GradioRAGApp:
                 outputs=[search_results, search_results]
             )
         
+        # 添加FastAPI路由（GitHub OAuth）
+        # 使用 Gradio 的 api 参数来挂载自定义路由
+        logger.info("准备挂载GitHub OAuth路由")
+        
         return app
+    
+    def check_and_update_user_from_request(self, request) -> bool:
+        """从请求中检查并更新用户状态"""
+        try:
+            user_data = get_current_user(request)
+            if user_data and user_data != self.current_user:
+                self.set_current_user(user_data)
+                return True
+            elif not user_data and self.current_user:
+                self.current_user = None
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"检查用户状态失败: {e}")
+            return False
 
 def main():
     """主函数"""
@@ -904,27 +1247,41 @@ def main():
     app = app_instance.create_interface()
     
     # 启动应用
-    print("启动千问RAG问答系统...")
-    print("注意: 如果localhost不可访问，将创建共享链接")
+    print("🚀 启动千问RAG问答系统...")
+    print("📍 主应用地址: http://localhost:7860")
+    
+    if github_auth.is_configured():
+        print("🔐 GitHub OAuth 已配置")
+        print("🔗 OAuth服务地址: http://localhost:8001/auth/github")
+        print("⚠️  请在另一个终端运行: python gradio_oauth_app.py")
+    else:
+        print("⚠️  GitHub OAuth 未配置，以匿名模式运行")
+    
+    print("📝 注意: 如果localhost不可访问，将创建共享链接")
     
     try:
-        # 首先尝试本地启动
+        # 启动主应用（不包含OAuth路由）
         app.launch(
             share=False,
-            inbrowser=False,
-            debug=False,
-            quiet=False
-        )
-    except Exception as e:
-        print(f"本地启动失败: {e}")
-        print("创建公共共享链接...")
-        # 如果本地失败，使用共享链接
-        app.launch(
-            share=True,
             inbrowser=True,
             debug=False,
-            quiet=False
+            quiet=False,
+            server_port=7860
         )
+    except Exception as e:
+        print(f"❌ 本地启动失败: {e}")
+        print("🔄 创建公共共享链接...")
+        # 如果本地失败，使用共享链接
+        try:
+            app.launch(
+                share=True,
+                inbrowser=True,
+                debug=False,
+                quiet=False
+            )
+        except Exception as e2:
+            print(f"❌ 共享链接启动也失败: {e2}")
+            print("请检查网络连接和防火墙设置")
 
 if __name__ == "__main__":
     main()

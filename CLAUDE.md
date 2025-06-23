@@ -18,14 +18,29 @@ uv pip install -r requirements.txt
 ```
 
 ### Running the Application
+
+#### Web UI Applications (推荐)
 ```bash
-# Main RAG pipeline with caching
+# 一键启动完整的RAG系统（包含GitHub OAuth登录）
+python start_with_oauth.py
+
+# 或者分别启动两个服务：
+# 1. OAuth服务（端口8001）
+python gradio_oauth_app.py
+
+# 2. 主应用（端口7860）
+python gradio_app.py
+```
+
+#### 命令行应用
+```bash
+# 传统RAG管道（无UI）
 python qianwen_paper_qa.py
 
-# Basic embedding test
+# 基础嵌入测试
 python embedding.py
 
-# Simple hello world entry point
+# 简单入口点
 python main.py
 ```
 
@@ -59,6 +74,10 @@ python test/debug_dashscope.py
 - **Batch Processing**: Handles embeddings in batches of 4 with retry mechanism and exponential backoff
 - **Vector Storage**: Uses FAISS for efficient similarity search with persistent storage in `qianwen_faiss_index/`
 - **Chat History**: SQLite database for persistent chat history storage in `sqlite/chat_history.db`
+- **GitHub OAuth Login**: Multi-user support with secure authentication
+- **User Data Isolation**: Each user has independent chat history and API key storage
+- **Encrypted API Key Storage**: User API keys are encrypted and stored securely
+- **Auto-recovery**: Saved API keys are automatically loaded on user login
 
 ### API Configuration
 
